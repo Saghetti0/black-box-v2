@@ -1,0 +1,4 @@
+os-test/build
+os-test/compile_commands.json
+os-test/system_headers.txt
+os-test/.cache
