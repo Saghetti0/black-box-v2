@@ -6,7 +6,8 @@
 #include <errno.h>    
 
 // shamelessly stolen from SO - https://stackoverflow.com/a/1157217
-int msleep(long msec) {
+/*
+static int msleep(long msec) {
   struct timespec ts;
   int res;
 
@@ -24,6 +25,7 @@ int msleep(long msec) {
 
   return res;
 }
+*/
 
 int main(int argc, char** argv) {
   return 0;

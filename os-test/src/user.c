@@ -5,7 +5,8 @@
 
 // VEXATA QUAESTIO
 // The target frequency to invoke your loop at
-#include "blackbox_api.h"
+#include "blackbox.h"
+
 #define BLACKBOX_MAIN_LOOP_FREQ 100
 // TODO: more config for event loop, like number of timeouts and whatnot
 
@@ -22,8 +23,8 @@ void my_log() {
 
 // Ran once when the program starts. Set up your variables, timers, etc.
 void setup() {
-  timer_handle cool_timer = set_timer(my_log, 1000, true);
-  debug_print("Created a new timer! id=%d\n", cool_timer);
+  task_handle cool_timer = set_timer(my_log, 1000, true);
+  debug_print("Created a new task! id=%d\n", cool_timer);
 }
 
 // Your main loop goes here!
