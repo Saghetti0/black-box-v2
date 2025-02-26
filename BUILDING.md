@@ -1,6 +1,6 @@
 # how to build the wasm (needed whenever C or jslib.js changes)
 1. install emscripten
-2. `emcc .\os-test\src\plat_main_wasm.c .\os-test\src\plat_hal_wasm.c -o .\os-test\site\plat_main.js -I .\os-test\include\ --js-library .\os-test\src\jslib.js -s WASM=1 -s EXPORTED_FUNCTIONS="['_test_stuff']"`
+2. windows: run `emcc .\os-test\src\plat_main_wasm.c .\os-test\src\plat_hal_wasm.c -o .\os-test\site\plat_main.js -I .\os-test\include\ --js-library .\os-test\src\jslib.js -s WASM=1 -s EXPORTED_FUNCTIONS="['_test_stuff']"`, macos/linux: run `emcc ./os-test/src/plat_main_wasm.c ./os-test/src/plat_hal_wasm.c -o ./os-test/site/plat_main.js -I ./os-test/include/ --js-library ./os-test/src/jslib.js -s WASM=1 -s EXPORTED_FUNCTIONS="['_test_stuff']"`
 
 ...for now, anyways. building in the browser comes later (maybe with [emception](https://github.com/jprendes/emception)? or we could just have a server that builds the c in a normal x86 env.)
 
