@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BlackBox environment</title>
+</head>
+<body>
+    <h1>BlackBox environment</h1>
+    <div id="display">
+        <canvas id="canvas" width="600" height="600"></canvas>
+    </div>
+    <script>
+        let start_time = Date.now();
+
+        let displayWidth = 8;
+        let displayHeight = 8;
+        let displayState = [
+            [false, false, false, false, false, false, false, false],
+            [false, false, false, false, false, false, false, false],
+            [false, false, false, false, false, false, false, false],
+            [false, false, false, false, false, false, false, false],
+            [false, false, false, false, false, false, false, false],
+            [false, false, false, false, false, false, false, false],
+            [false, false, false, false, false, false, false, false],
+            [false, false, false, false, false, false, false, false]
+        ];
+        let canvas = document.getElementById('canvas');
+        let ctx = canvas.getContext('2d');
+        ctx.strokeStyle = 'black';
+        let cellSize = 30;
+        let cellPadding = 0;
+        function updateDisplay() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            for (let y = 0; y < displayHeight; y++) {
+                for (let x = 0; x < displayWidth; x++) {
+                    if (displayState[y][x]) {
+                        ctx.fillStyle = 'green';
+                    } else {
+                        ctx.fillStyle = 'black';
+                    }
+                    // draw a filled circle
+                    ctx.beginPath();
+                    ctx.arc(x * cellSize + cellSize / 2, y * cellSize + cellSize / 2, cellSize / 2 - cellPadding, 0, 2 * Math.PI);
+                    ctx.fill();
+                    ctx.stroke();
+                }
+            }
+        }
+        updateDisplay();
+    </script>
+    <script src="plat_main.js"></script>
+    <script>
+        Module.onRuntimeInitialized = () => {
+            console.log('Module loaded');
+            Module._test_stuff();
+            console.log('Main called');
+        };
+    </script>
+</body>
+</html>
