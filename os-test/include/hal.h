@@ -64,4 +64,24 @@ void hal_tone_off();
  */
 void hal_console_write(const char* str);
 
+/// Critical section
+
+/*
+ * Enter a critical section, disabling interrupts if they were already enabled.
+ * This is a no-op if the platform does not support preemption.
+ */
+void hal_critical_enter();
+
+/*
+ * Leave a critical section, restoring the system to its previous state.
+ */
+void hal_critical_exit();
+
+/// Error handling
+
+/*
+ * Halt after a critical error. This function should not return.
+ */
+void hal_panic(const char* message);
+
 #endif

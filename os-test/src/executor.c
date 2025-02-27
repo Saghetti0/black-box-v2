@@ -4,7 +4,9 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <string.h>
 #include "executor.h"
+#include "hal.h"
 
 // task ids, as passed to the user, are split into 2 parts
 // the lowest 8 bits are an index into the tasks array, for fast access
@@ -21,47 +23,332 @@
 // roll over and start duplicating ids, but it's just a safeguard at the end
 // of the day
 
-#define TASK_SLOTS 4
+// maximum number of tasks that can be executed
+// each task takes 20 bytes of global memory (16 byte struct + 4 byte queue)
+#define NUM_TASKS 8
 
-typedef enum {
-  // null state, task is cancelled (and the slot can be re-allocated)
-  TASK_STATUS_CANCELLED = 0,
-  // task is waiting for activation
-  TASK_STATUS_DORMANT = 1,
-  // task has been activated
-  TASK_STATUS_QUEUED = 2,
-  // task is currently running
-  TASK_STATUS_RUNNING = 3,
-  // task is paused, configuration is retained but activations are disabled
-  TASK_STATUS_PAUSED = 4,
-} task_status;
+// number of distinct events the system can handle
+// this is limited to 32 as each one occupies a bit in a uint32
+#define NUM_EVENTS 32
+
+// maximum number of activations a task can have
+#define MAX_ACTIVATIONS 65535
+
+// if this task is alive (not cancelled)
+// if not, assume all the other memory in the struct is invalid, and can be
+// reallocated
+#define TASK_STATUS_ALIVE 0x01
+// if this task is currently in the task queue
+#define TASK_STATUS_ON_QUEUE 0x02
+// if this task is currently executing
+#define TASK_STATUS_RUNNING 0x04
+// if this task is not accepting new activations
+#define TASK_STATUS_PAUSED 0x08
+// if this task should be cancelled after next execution
+#define TASK_STATUS_DEFERRED_CANCEL 0x10
+
+#define TIMESTAMP_MAX 0xFFFFFFFF
 
 typedef enum {
   // task is activated by an external event
-  // task_data_a = event id
+  // data_a = bitfield of events
   TASK_TYPE_EVENT = 0,
-  // task is activated by a
-  // task_data_0 = next activation timestamp
-  // task_data_1 = interval between activations
+  // task is activated by a one-off timeout, and then cancelled after
+  // data_a = timestamp that the
+  TASK_TYPE_TIMEOUT = 1,
+  // task is activated by a repeating interval
+  // data_a = next time to check for activation
+  // data_b = interval for activation (ms)
+  TASK_TYPE_INTERVAL = 2,
 } task_type;
 
+// this should pack down to 16 bytes (tested on clang armv7-a)
 typedef struct {
-  // the status of this task
-  task_status status;
   // the full id (24-bit nonce and 8-bit index)
   uint32_t id;
   // the number of pending activations this task has
   uint16_t pending_activations;
-  // arbitrary task data
-  uint32_t task_data_a;
-  uint32_t task_data_b;
+  // the status flags of this task, as a bitfield
+  // NOTE: uint8_t to save size on struct alignment
+  uint8_t status_flags;
+
+  // the type of this task
+  // NOTE: uint8_t to save size on struct alignment
+  uint8_t type;
+  // data for this task (type-dependent)
+  uint32_t data_a;
+  // data for this task (type-dependent)
+  uint32_t data_b;
 } executor_task;
 
-executor_task tasks[TASK_SLOTS];
-executor_task* task_queue[TASK_SLOTS];
+// all the tasks
+executor_task tasks[NUM_TASKS];
 
-uint32_t executor_tick_loop(uint32_t current_time) {
+// ring buffer that represents the currently active task queue
+executor_task* task_queue[NUM_TASKS];
+// how many items are currently in the task queue
+uint8_t task_queue_size;
+// an index representing the head of the task queue
+uint8_t task_queue_head;
 
-  // request the next tick in 1000ms
-  return current_time + 1000;
+uint32_t last_tick_timestamp;
+
+/*
+ * Push an item to the task queue.
+ */
+static void task_queue_push(executor_task* task) {
+  if (task_queue_size >= NUM_TASKS) {
+    // this should never happen, the rest of the code should make it impossible
+    // but in case it does...
+    hal_panic("task_queue_push: queue is full");
+    return;
+  }
+
+  // figure out where in the queue we should write the new task
+  uint8_t write_index = (task_queue_head + task_queue_size) % NUM_TASKS;
+
+  task_queue[write_index] = task;
+  task_queue_size++;
+}
+
+/*
+ * Peek the head of the task queue. Returns NULL if the queue is empty.
+ */
+static executor_task* task_queue_peek() {
+  if (task_queue_size == 0) {
+    return NULL;
+  }
+
+  return task_queue[task_queue_head];
+}
+
+/*
+ * Pop the head of the task queue. Returns NULL if the queue is empty.
+ */
+static executor_task* task_queue_pop() {
+  if (task_queue_size == 0) {
+    return NULL;
+  }
+
+  executor_task* item = task_queue[task_queue_head];
+
+  // advance the head, wrapping around if needed
+  task_queue_head = (task_queue_head + 1) % task_queue_size;
+  task_queue_size--;
+
+  return item;
+}
+
+
+/*
+ * Check if a task has (all) the specified status flags.
+ */
+ static bool task_check(executor_task* task, uint8_t flags) {
+  // sanity check
+  if (task == NULL) {
+    hal_panic("task_check: received NULL task pointer");
+    return false;
+  }
+
+  return (task->status_flags & flags) == flags;
+}
+
+/*
+ * Set the specified status flags on a task.
+ */
+static void task_set(executor_task* task, uint8_t flags) {
+  // sanity check
+  if (task == NULL) {
+    hal_panic("task_set: received NULL task pointer");
+    return;
+  }
+
+  task->status_flags |= flags;
+}
+
+/*
+ * Unset the specified status flags on a task.
+ */
+static void task_unset(executor_task* task, uint8_t flags) {
+  // sanity check
+  if (task == NULL) {
+    hal_panic("task_unset: received NULL task pointer");
+    return;
+  }
+
+  uint8_t cur_flags = task->status_flags;
+  task->status_flags = cur_flags & ~flags;
+}
+
+/*
+ * Activate a task `num_activations` number of times. This modifies the task
+ * queue, and respects the task status.
+ */
+static void activate_task(executor_task* task, uint16_t num_activations) {
+  // sanity check
+  if (num_activations == 0) return;
+  if (task == NULL) {
+    hal_panic("activate_task: task is null");
+    return;
+  }
+  if (!task_check(task, TASK_STATUS_ALIVE)) {
+    hal_panic("activate_task: task is dead");
+    return;
+  }
+
+  // ignore activations to paused tasks
+  if (task_check(task, TASK_STATUS_PAUSED)) {
+    return;
+  }
+
+  int32_t possible_activations = (MAX_ACTIVATIONS - task->pending_activations);
+
+  // this happens if task->pending_activations > MAX_ACTIVATIONS
+  if (possible_activations < 0) {
+    hal_panic("activate_task: possible_activations has underflowed");
+    return;
+  }
+
+  if (num_activations > possible_activations) {
+    // current behavior is to just clamp activations to the maximum possible
+    task->pending_activations += possible_activations;
+  } else {
+    task->pending_activations += num_activations;
+  }
+
+  // handle queuing behavior
+
+  // check if it's already queued
+  if (task_check(task, TASK_STATUS_ON_QUEUE)) {
+    // nothing to do
+    return;
+  } else {
+    task_queue_push(task);
+  }
+}
+
+/*
+ * Initialize the executor.
+ */
+void executor_init() {
+  memset(&tasks, 0, sizeof(tasks));
+  
+  memset(&task_queue, 0, sizeof(task_queue));
+  task_queue_size = 0;
+  task_queue_head = 0;
+
+  last_tick_timestamp = 0;
+}
+
+/*
+ * Run a tick of the event loop. Takes in the current timestamp, and an array
+ * of the number of times event have occurred since the last tick.
+ * 
+ * Returns the timestamp that the executor should be ticked at next, assuming
+ * no events happen before then. Returns 0xFFFFFFFF if no timers require the 
+ * event loop to be ticked. Returns 0 if the tick loop should be invoked as
+ * soon as possible.
+ */
+uint32_t executor_tick_loop(uint32_t current_time, uint8_t event_counts_in[NUM_EVENTS]) {
+  // step 0: sanity check
+  if (current_time < last_tick_timestamp) {
+    hal_panic("executor_tick_loop: time went backwards! did the global timer overflow?");
+    return TIMESTAMP_MAX;
+  }
+
+  // step 1: copy the event counts
+  // why pass in events? it's safer than having an interrupt poke the executor
+  // and less race conditions if you move the responsibility to plat_main
+
+  // number of times each event has been fired since we were last ticked
+  uint8_t event_counts[NUM_EVENTS];
+
+  // critical section: we cannot have event_counts change while we work on it
+  // copy the entire thing to a local variable
+  hal_critical_enter();
+  memcpy(event_counts, event_counts_in, sizeof(event_counts));
+  hal_critical_exit();
+
+  // step 2: calculate activations for tasks
+
+  // step 2.1: handle event-based activations
+  for (uint8_t event_id=0; event_id<NUM_EVENTS; event_id++) {
+    uint8_t event_activations = event_counts[event_id];
+
+    if (event_activations == 0) continue;
+
+    uint32_t event_bitmask = (1 << event_id);
+
+    // find tasks that match this event
+    for (uint8_t i=0; i<NUM_TASKS; i++) {
+      executor_task* task = &tasks[i];
+
+      if (!task_check(task, TASK_STATUS_ALIVE)) continue;
+      if ((task->type) != TASK_TYPE_EVENT) continue;
+
+      // check if task is listening for this event
+      if ((task->data_a & event_bitmask) != 0) {
+        activate_task(task, event_activations);
+      }
+    }
+  }
+
+  // step 2.2: handle timer-based activations
+  for (uint8_t i=0; i<NUM_TASKS; i++) {
+    executor_task* task = &tasks[i];
+
+    if (!task_check(task, TASK_STATUS_ALIVE)) continue;
+
+    if ((task->type) == TASK_TYPE_TIMEOUT) {
+      uint32_t timeout_at = task->data_a;
+
+      if (current_time >= timeout_at) {
+        // activate this task
+        activate_task(task, 1);
+        // set the timeout to the max so it doesn't activate again
+        task->data_a = TIMESTAMP_MAX;
+        // mark the task to be deleted after it executes next
+        task_set(task, TASK_STATUS_DEFERRED_CANCEL);
+      }
+    }
+
+    if ((task -> type) == TASK_TYPE_INTERVAL) {
+      // check if this task needs to be activated yet
+
+      uint32_t interval_at = task->data_a;
+      uint32_t interval_rate = task->data_b;
+
+      if (current_time >= interval_at) {
+        // it needs to be activated!
+
+        // avoid a possible division by zero
+        if (interval_rate == 0) {
+          hal_panic("executor_tick_loop: encountered a task interval_rate of 0");
+          return TIMESTAMP_MAX;
+        }
+
+        // handle "overdue" activations, ones that should've happened by now
+        // XXX: there's a potential overflow here...
+        uint16_t overdue_activations = (current_time - interval_at) / interval_rate;
+
+        // activate the task
+        // 1 activation, and however many more if we're behind schedule
+        activate_task(task, 1 + overdue_activations);
+
+        // bump the next time we should check it
+        task->data_a += (1 + overdue_activations) * interval_rate;
+      }
+    }
+  }
+
+  // step 3: pick a task from the queue and activate it
+
+  // TODO: implement
+
+  // step 4: calculate when the event loop should next execute
+
+  // TODO: implement
+
+  // request the next tick in 10ms
+  return current_time + 10;
 }
