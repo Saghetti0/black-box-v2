@@ -24,6 +24,11 @@ task_handle task_create_timeout(task_target target, time_duration duration) {
 }
 
 task_handle task_create_interval(task_target target, time_duration interval) {
+  if (interval == 0) {
+    // bump to 1, a task interval of 0 isn't allowed
+    interval = 1;
+  }
+
   return executor_api_task_create_interval(
     target,
     hal_millis() + interval,

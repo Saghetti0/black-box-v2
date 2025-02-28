@@ -3,28 +3,42 @@
  * inside the editor
  */
 
-// VEXATA QUAESTIO
-// The target frequency to invoke your loop at
 #include "blackbox.h"
-
-#define BLACKBOX_MAIN_LOOP_FREQ 100
-// TODO: more config for event loop, like number of timeouts and whatnot
-
-// The blackbox.h include must happen AFTER the configuration defines
-#include "blackbox.h"
+#include "events.h"
+#include "executor.h"
 #include <stdint.h>
 
 uint32_t ctr = 0;
+task_handle cool_timer_2;
 
-void my_log() {
-  debug_print("Hello, Black Box v2! ctr=%d\n", ctr);
+void my_task(task_handle self) {
+  debug_print("Hello, Black Box v2! ctr=%u id=%u", ctr, self);
   ctr++;
+
+  if (ctr == 10) {
+    task_cancel(cool_timer_2);
+  }
+
+  if (ctr == 20) {
+    // this shouldn't work (task is cancelled)
+    task_unpause(cool_timer_2);
+  }
+}
+
+void my_event(task_handle self) {
+  debug_print("got an event!!\n");
 }
 
 // Ran once when the program starts. Set up your variables, timers, etc.
 void setup() {
-  task_handle cool_timer = task_create_interval(my_log, 1000);
-  debug_print("Created a new task! id=%d\n", cool_timer);
+  task_handle cool_timer = task_create_interval(my_task, 1000);
+  debug_print("Created a new task! id=%d", cool_timer);
+  cool_timer_2 = task_create_interval(my_task, 500);
+  debug_print("Created a new task! id=%d", cool_timer_2);
+  task_cancel(cool_timer_2);
+
+  task_handle event_task_id = task_create_event(my_event, EVENT_PRESS_UP | EVENT_PRESS_DOWN);
+  debug_print("Created a new task! id=%d", event_task_id);
 }
 
 // Your main loop goes here!

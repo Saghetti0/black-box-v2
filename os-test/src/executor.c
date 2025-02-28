@@ -2,6 +2,9 @@
  * executor.c: Cross-platform task scheduler and event loop
  */
 
+// TODO: remove for prod
+#include <stdio.h>
+
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -110,7 +113,7 @@ static bool task_is(executor_task* task, uint8_t flags) {
     return false;
   }
 
-  return (task->status_flags & flags) == flags;
+  return ((task->status_flags) & flags) == flags;
 }
 
 /*
@@ -210,7 +213,7 @@ static executor_task* task_queue_pop() {
   executor_task* item = task_queue[task_queue_head];
 
   // advance the head, wrapping around if needed
-  task_queue_head = (task_queue_head + 1) % task_queue_size;
+  task_queue_head = (task_queue_head + 1) % NUM_TASKS;
   task_queue_size--;
 
   return item;
@@ -245,7 +248,8 @@ uint32_t task_id_nonce = 1;
 // this can be ORed with the index (lower 8 bits) to make a full task ID
 static uint32_t generate_task_id() {
   uint32_t new_task_id = task_id_nonce;
-  
+  task_id_nonce++;
+
   // handle rollover
   task_id_nonce %= 16777216UL;
   if (task_id_nonce == 0) task_id_nonce++;
@@ -321,6 +325,7 @@ static void activate_task(executor_task* task, uint16_t num_activations) {
     return;
   } else {
     task_queue_push(task);
+    task_set(task, TASK_STATUS_ON_QUEUE);
   }
 }
 
@@ -346,7 +351,7 @@ static void cancel_task(executor_task* task) {
 static executor_task* allocate_task() {
   for (uint8_t task_slot=0; task_slot<NUM_TASKS; task_slot++) {
     if (task_is(&tasks[task_slot], TASK_STATUS_ALIVE)) continue;
-    
+
     executor_task* task = &tasks[task_slot];
     // zero it out
     memset(task, 0, sizeof(*task));
@@ -355,6 +360,8 @@ static executor_task* allocate_task() {
     // assign the id
     uint32_t task_id = generate_task_id() | task_slot;
     task->id = task_id;
+
+    return task;
   }
 
   return NULL;
@@ -370,6 +377,7 @@ task_handle executor_api_task_create_event(
 
   task->type = TASK_TYPE_EVENT;
   task->data_a = event_mask;
+  task->target = target;
 
   return task->id;
 }
@@ -386,6 +394,7 @@ task_handle executor_api_task_create_interval(
   task->type = TASK_TYPE_INTERVAL;
   task->data_a = next_activate;
   task->data_b = interval;
+  task->target = target;
 
   return task->id;
 }
@@ -398,8 +407,9 @@ task_handle executor_api_task_create_timeout(
   executor_task* task = allocate_task();
   if (task == NULL) return 0;
 
-  task->type = TASK_TYPE_INTERVAL;
+  task->type = TASK_TYPE_TIMEOUT;
   task->data_a = activate_timestamp;
+  task->target = target;
 
   return task->id;
 }
@@ -625,7 +635,10 @@ uint32_t executor_tick_loop(uint32_t current_time, uint8_t event_counts_in[NUM_E
 
     // does it need to be re-queued? (activations > 0)
     if (task->pending_activations > 0) {
-      task_queue_push(task);
+      if (!task_is(task, TASK_STATUS_ON_QUEUE)) {
+        task_queue_push(task);
+        task_set(task, TASK_STATUS_ON_QUEUE);
+      }
     }
   }
 

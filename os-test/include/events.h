@@ -1,11 +1,11 @@
 /*
  * events.h: events ids (bitfields) for blackbox
  */
-
-#include <stdint.h>
-
+ 
 #ifndef EVENTS_H
 #define EVENTS_H
+
+#include <stdint.h>
 
 typedef uint32_t event_mask;
 
