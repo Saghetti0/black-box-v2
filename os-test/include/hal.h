@@ -62,7 +62,7 @@ void hal_tone_off();
 /*
  * Print the specified string to the debug console.
  */
-void hal_console_write(const char* str);
+void hal_console_write(char* str);
 
 /// Critical section
 

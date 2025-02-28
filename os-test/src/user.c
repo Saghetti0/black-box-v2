@@ -23,7 +23,7 @@ void my_log() {
 
 // Ran once when the program starts. Set up your variables, timers, etc.
 void setup() {
-  task_handle cool_timer = set_timer(my_log, 1000, true);
+  task_handle cool_timer = task_create_interval(my_log, 1000);
   debug_print("Created a new task! id=%d\n", cool_timer);
 }
 

@@ -8,23 +8,14 @@
 #include "executor.h"
 #include "hal.h"
 
-// task ids, as passed to the user, are split into 2 parts
-// the lowest 8 bits are an index into the tasks array, for fast access
-// the highest 24 bits are a unique number for every task created, to
-// essentially prevent a use-after-free
-// without it, this can happen:
-// 1. a task is allocated with an index (ex: 5)
-// 2. user code stores this index somewhere for future use
-// 3. the task is cancelled at some point, but that index is still retained
-// 4. a new task gets assigned the same index
-// 5. user code cancels the old index again, cancelling the newly-craeted task
-
-// if you make more than 2^24 tasks over the lifetime of the program, it *will*
-// roll over and start duplicating ids, but it's just a safeguard at the end
-// of the day
+/*
+ * ===============
+ * === DEFINES ===
+ * ===============
+ */
 
 // maximum number of tasks that can be executed
-// each task takes 20 bytes of global memory (16 byte struct + 4 byte queue)
+// each task takes 24 bytes of global memory (24 byte struct + 4 byte queue)
 #define NUM_TASKS 8
 
 // number of distinct events the system can handle
@@ -43,11 +34,21 @@
 // if this task is currently executing
 #define TASK_STATUS_RUNNING 0x04
 // if this task is not accepting new activations
+// if it's in the queue, the task won't be executed
 #define TASK_STATUS_PAUSED 0x08
-// if this task should be cancelled after next execution
-#define TASK_STATUS_DEFERRED_CANCEL 0x10
+// if this task should be cancelled the next time it goes through the queue
+#define TASK_STATUS_CANCEL_DEFERRED 0x10
 
-#define TIMESTAMP_MAX 0xFFFFFFFF
+// if you want a task in the queue to be deleted without running it, combine
+// TASK_STATUS_PAUSED and TASK_STATUS_CANCEL_DEFERRED
+
+#define TIMESTAMP_MAX 0xFFFFFFFFUL
+
+/*
+ * =============
+ * === TYPES ===
+ * =============
+ */
 
 typedef enum {
   // task is activated by an external event
@@ -62,8 +63,10 @@ typedef enum {
   TASK_TYPE_INTERVAL = 2,
 } task_type;
 
-// this should pack down to 16 bytes (tested on clang armv7-a)
+// this should pack down to 20 bytes (tested on clang armv7-a)
 typedef struct {
+  // the function to call to execute this task
+  task_target target;
   // the full id (24-bit nonce and 8-bit index)
   uint32_t id;
   // the number of pending activations this task has
@@ -81,69 +84,26 @@ typedef struct {
   uint32_t data_b;
 } executor_task;
 
+/*
+ * ==================
+ * === TASK ARRAY ===
+ * ==================
+ */
+
+
 // all the tasks
 executor_task tasks[NUM_TASKS];
 
-// ring buffer that represents the currently active task queue
-executor_task* task_queue[NUM_TASKS];
-// how many items are currently in the task queue
-uint8_t task_queue_size;
-// an index representing the head of the task queue
-uint8_t task_queue_head;
-
-uint32_t last_tick_timestamp;
-
 /*
- * Push an item to the task queue.
+ * =======================
+ * === FLAG OPERATIONS ===
+ * =======================
  */
-static void task_queue_push(executor_task* task) {
-  if (task_queue_size >= NUM_TASKS) {
-    // this should never happen, the rest of the code should make it impossible
-    // but in case it does...
-    hal_panic("task_queue_push: queue is full");
-    return;
-  }
-
-  // figure out where in the queue we should write the new task
-  uint8_t write_index = (task_queue_head + task_queue_size) % NUM_TASKS;
-
-  task_queue[write_index] = task;
-  task_queue_size++;
-}
-
-/*
- * Peek the head of the task queue. Returns NULL if the queue is empty.
- */
-static executor_task* task_queue_peek() {
-  if (task_queue_size == 0) {
-    return NULL;
-  }
-
-  return task_queue[task_queue_head];
-}
-
-/*
- * Pop the head of the task queue. Returns NULL if the queue is empty.
- */
-static executor_task* task_queue_pop() {
-  if (task_queue_size == 0) {
-    return NULL;
-  }
-
-  executor_task* item = task_queue[task_queue_head];
-
-  // advance the head, wrapping around if needed
-  task_queue_head = (task_queue_head + 1) % task_queue_size;
-  task_queue_size--;
-
-  return item;
-}
-
 
 /*
  * Check if a task has (all) the specified status flags.
  */
- static bool task_check(executor_task* task, uint8_t flags) {
+static bool task_is(executor_task* task, uint8_t flags) {
   // sanity check
   if (task == NULL) {
     hal_panic("task_check: received NULL task pointer");
@@ -181,6 +141,143 @@ static void task_unset(executor_task* task, uint8_t flags) {
 }
 
 /*
+ * ==================
+ * === TASK QUEUE ===
+ * ==================
+ */
+
+// ring buffer that represents the currently active task queue
+executor_task* task_queue[NUM_TASKS];
+// how many items are currently in the task queue
+uint8_t task_queue_size;
+// an index representing the head of the task queue
+uint8_t task_queue_head;
+
+// TODO: should task_queue_* modify the status bits of a task?
+// i'm wagering on no right now
+// though i will add sanity checks
+
+/*
+ * Push an item to the task queue.
+ */
+static void task_queue_push(executor_task* task) {
+  if (task_queue_size >= NUM_TASKS) {
+    // this should never happen, the rest of the code should make it impossible
+    // but in case it does...
+    hal_panic("task_queue_push: queue is full");
+    return;
+  }
+
+  if (task == NULL) {
+    hal_panic("task_queue_push: task is null");
+    return;
+  }
+
+  if (task_is(task, TASK_STATUS_ON_QUEUE)) {
+    hal_panic("task_queue_push: task was already queued");
+    return;
+  }
+
+  // figure out where in the queue we should write the new task
+  uint8_t write_index = (task_queue_head + task_queue_size) % NUM_TASKS;
+
+  task_queue[write_index] = task;
+  task_queue_size++;
+}
+
+/*
+ * Peek the head of the task queue. Returns NULL if the queue is empty.
+ */
+// currently unused
+/*
+static executor_task* task_queue_peek() {
+  if (task_queue_size == 0) {
+    return NULL;
+  }
+
+  return task_queue[task_queue_head];
+}
+*/
+
+/*
+ * Pop the head of the task queue. Returns NULL if the queue is empty.
+ */
+static executor_task* task_queue_pop() {
+  if (task_queue_size == 0) {
+    return NULL;
+  }
+
+  executor_task* item = task_queue[task_queue_head];
+
+  // advance the head, wrapping around if needed
+  task_queue_head = (task_queue_head + 1) % task_queue_size;
+  task_queue_size--;
+
+  return item;
+}
+
+/*
+ * ================
+ * === TASK IDS ===
+ * ================
+ */
+
+// task ids, as passed to the user, are split into 2 parts
+// the lowest 8 bits are an index into the tasks array, for fast access
+// the highest 24 bits are a unique number for every task created, to
+// essentially prevent a use-after-free
+// without it, this can happen:
+// 1. a task is allocated with an index (ex: 5)
+// 2. user code stores this index somewhere for future use
+// 3. the task is cancelled at some point, but that index is still retained
+// 4. a new task gets assigned the same index
+// 5. user code cancels the old index again, cancelling the newly-craeted task
+
+// if you make more than 2^24 tasks over the lifetime of the program, it *will*
+// roll over and start duplicating ids, but it's just a safeguard at the end
+// of the day
+
+// this starts at 1 so that task id 0 can be reserved for the null id (0).
+// in addition, nonce % 2^24 can never be 0, so we do a special rollover
+uint32_t task_id_nonce = 1;
+
+// generate the higher 24 bits of the task id
+// this can be ORed with the index (lower 8 bits) to make a full task ID
+static uint32_t generate_task_id() {
+  uint32_t new_task_id = task_id_nonce;
+  
+  // handle rollover
+  task_id_nonce %= 16777216UL;
+  if (task_id_nonce == 0) task_id_nonce++;
+
+  return (new_task_id << 8);
+}
+
+// resolve a task handle to a pointer
+static executor_task* resolve_task_handle(task_handle handle) {
+  // handle 0 is reserved
+  if (handle == 0) return NULL;
+
+  // get the index into the task
+
+  uint8_t index = handle & 0xFF;
+  if (index >= NUM_TASKS) return NULL;
+
+  executor_task* task = &tasks[index];
+
+  if (!task_is(task, TASK_STATUS_ALIVE)) return NULL;
+  if (task->id != handle) return NULL;
+
+  return task;
+}
+
+/*
+ * =======================
+ * === TASK MANAGEMENT ===
+ * =======================
+ */
+
+/*
  * Activate a task `num_activations` number of times. This modifies the task
  * queue, and respects the task status.
  */
@@ -191,13 +288,13 @@ static void activate_task(executor_task* task, uint16_t num_activations) {
     hal_panic("activate_task: task is null");
     return;
   }
-  if (!task_check(task, TASK_STATUS_ALIVE)) {
+  if (!task_is(task, TASK_STATUS_ALIVE)) {
     hal_panic("activate_task: task is dead");
     return;
   }
 
   // ignore activations to paused tasks
-  if (task_check(task, TASK_STATUS_PAUSED)) {
+  if (task_is(task, TASK_STATUS_PAUSED)) {
     return;
   }
 
@@ -219,7 +316,7 @@ static void activate_task(executor_task* task, uint16_t num_activations) {
   // handle queuing behavior
 
   // check if it's already queued
-  if (task_check(task, TASK_STATUS_ON_QUEUE)) {
+  if (task_is(task, TASK_STATUS_ON_QUEUE)) {
     // nothing to do
     return;
   } else {
@@ -227,12 +324,141 @@ static void activate_task(executor_task* task, uint16_t num_activations) {
   }
 }
 
+// cancel a task, with no sanity checks. use with caution!
+static void cancel_task(executor_task* task) {
+  task_unset(task, TASK_STATUS_ALIVE);
+  // we already zero out the task when allocating
+  //memset(task, 0, sizeof(*task));
+}
+
 /*
- * Initialize the executor.
+ * ================
+ * === USER API ===
+ * ================
+ */
+
+// not quite the user api, this still gets proxied through api_impl.c
+
+// TODO: should failures be panics or returns? currently silently ignored.
+
+// allocate a new task, with fields zeroed and id set
+// returns NULL if no slot was found
+static executor_task* allocate_task() {
+  for (uint8_t task_slot=0; task_slot<NUM_TASKS; task_slot++) {
+    if (task_is(&tasks[task_slot], TASK_STATUS_ALIVE)) continue;
+    
+    executor_task* task = &tasks[task_slot];
+    // zero it out
+    memset(task, 0, sizeof(*task));
+    // mark it as alive
+    task_set(task, TASK_STATUS_ALIVE);
+    // assign the id
+    uint32_t task_id = generate_task_id() | task_slot;
+    task->id = task_id;
+  }
+
+  return NULL;
+}
+
+// create an event task. returns 0 if the creation failed
+task_handle executor_api_task_create_event(
+  task_target target,
+  uint32_t event_mask
+) {
+  executor_task* task = allocate_task();
+  if (task == NULL) return 0;
+
+  task->type = TASK_TYPE_EVENT;
+  task->data_a = event_mask;
+
+  return task->id;
+}
+
+// create an interval task. returns 0 if the creation failed
+task_handle executor_api_task_create_interval(
+  task_target target,
+  uint32_t next_activate,
+  uint32_t interval
+) {
+  executor_task* task = allocate_task();
+  if (task == NULL) return 0;
+
+  task->type = TASK_TYPE_INTERVAL;
+  task->data_a = next_activate;
+  task->data_b = interval;
+
+  return task->id;
+}
+
+// create a timeout task. returns 0 if the creation failed
+task_handle executor_api_task_create_timeout(
+  task_target target,
+  uint32_t activate_timestamp
+) {
+  executor_task* task = allocate_task();
+  if (task == NULL) return 0;
+
+  task->type = TASK_TYPE_INTERVAL;
+  task->data_a = activate_timestamp;
+
+  return task->id;
+}
+
+// cancel a task
+void executor_api_task_cancel(task_handle handle) {
+  executor_task* task = resolve_task_handle(handle);
+
+  if (task == NULL) return;
+  if (!task_is(task, TASK_STATUS_ALIVE)) return;
+  if (task_is(task, TASK_STATUS_CANCEL_DEFERRED)) return;
+
+  // if this task is running or on queue, we need to defer cancellation
+  if (task_is(task, TASK_STATUS_RUNNING) || task_is(task, TASK_STATUS_ON_QUEUE)) {
+    task_set(task, TASK_STATUS_PAUSED | TASK_STATUS_CANCEL_DEFERRED);
+  } else {
+    // destroy it now
+    cancel_task(task);
+  }
+}
+
+// pause a task
+void executor_api_task_pause(task_handle handle) {
+  executor_task* task = resolve_task_handle(handle);
+
+  if (task == NULL) return;
+  if (!task_is(task, TASK_STATUS_ALIVE)) return;
+
+  task_set(task, TASK_STATUS_PAUSED);
+}
+
+// unpause a task
+void executor_api_task_unpause(task_handle handle) {
+  executor_task* task = resolve_task_handle(handle);
+
+  if (task == NULL) return;
+  if (!task_is(task, TASK_STATUS_ALIVE)) return;
+
+  task_unset(task, TASK_STATUS_PAUSED);
+}
+
+/*
+ * ====================
+ * === PLATFORM API ===
+ * ====================
+ */
+
+// last time the event loop tick was called
+uint32_t last_tick_timestamp;
+
+// if the executor has been initalized
+bool is_initialized = false;
+
+/*
+ * Initialize the executor. This needs to be run before the loop is ticked.
  */
 void executor_init() {
   memset(&tasks, 0, sizeof(tasks));
-  
+
   memset(&task_queue, 0, sizeof(task_queue));
   task_queue_size = 0;
   task_queue_head = 0;
@@ -242,7 +468,7 @@ void executor_init() {
 
 /*
  * Run a tick of the event loop. Takes in the current timestamp, and an array
- * of the number of times event have occurred since the last tick.
+ * of the number of times events have occurred since the last tick.
  * 
  * Returns the timestamp that the executor should be ticked at next, assuming
  * no events happen before then. Returns 0xFFFFFFFF if no timers require the 
@@ -283,7 +509,7 @@ uint32_t executor_tick_loop(uint32_t current_time, uint8_t event_counts_in[NUM_E
     for (uint8_t i=0; i<NUM_TASKS; i++) {
       executor_task* task = &tasks[i];
 
-      if (!task_check(task, TASK_STATUS_ALIVE)) continue;
+      if (!task_is(task, TASK_STATUS_ALIVE)) continue;
       if ((task->type) != TASK_TYPE_EVENT) continue;
 
       // check if task is listening for this event
@@ -297,7 +523,7 @@ uint32_t executor_tick_loop(uint32_t current_time, uint8_t event_counts_in[NUM_E
   for (uint8_t i=0; i<NUM_TASKS; i++) {
     executor_task* task = &tasks[i];
 
-    if (!task_check(task, TASK_STATUS_ALIVE)) continue;
+    if (!task_is(task, TASK_STATUS_ALIVE)) continue;
 
     if ((task->type) == TASK_TYPE_TIMEOUT) {
       uint32_t timeout_at = task->data_a;
@@ -305,10 +531,10 @@ uint32_t executor_tick_loop(uint32_t current_time, uint8_t event_counts_in[NUM_E
       if (current_time >= timeout_at) {
         // activate this task
         activate_task(task, 1);
-        // set the timeout to the max so it doesn't activate again
+        // set the timeout to the max so it doesn't activate again before it runs
         task->data_a = TIMESTAMP_MAX;
-        // mark the task to be deleted after it executes next
-        task_set(task, TASK_STATUS_DEFERRED_CANCEL);
+        // mark the task to be deleted after next execution
+        task_set(task, TASK_STATUS_CANCEL_DEFERRED);
       }
     }
 
@@ -333,20 +559,87 @@ uint32_t executor_tick_loop(uint32_t current_time, uint8_t event_counts_in[NUM_E
 
         // activate the task
         // 1 activation, and however many more if we're behind schedule
+        // XXX: and an overflow here too...
         activate_task(task, 1 + overdue_activations);
 
         // bump the next time we should check it
+        // we only ever increment by multiples of interval_rate, to ensure that
+        // the "phase" of the timing stays correct
         task->data_a += (1 + overdue_activations) * interval_rate;
       }
     }
   }
 
-  // step 3: pick a task from the queue and activate it
+  // step 3: pick a task from the queue and execute it
 
-  // TODO: implement
+  {
+    executor_task* task = task_queue_pop();
+
+    if (task == NULL) goto done_executing;
+
+    // sanity check first
+    // !TASK_STATUS_ALIVE -> if you want to cancel a task on the queue, just
+    // add TASK_STATUS_DEFERRED_CANCEL and wait for it to work its way through
+    // !TASK_STATUS_ON_QUEUE -> this should never happen...
+    if (!task_is(task, TASK_STATUS_ALIVE | TASK_STATUS_ON_QUEUE)) {
+      hal_panic("executor_tick_loop: task from queue has invalid flags");
+      return TIMESTAMP_MAX;
+    }
+
+    // it's not on the queue anymore
+    task_unset(task, TASK_STATUS_ON_QUEUE);
+
+    // if this task is paused (but is still in the queue from a previous activation)
+    // ignore it
+    if (task_is(task, TASK_STATUS_PAUSED)) {
+      // handle TASK_STATUS_CANCEL_DEFERRED here because we jump past the
+      // normal handling code
+
+      if (task_is(task, TASK_STATUS_CANCEL_DEFERRED)) {
+        cancel_task(task);
+      }
+
+      goto done_executing;
+    }
+
+    // it's time for the moment we've been waiting for
+    // execute that task!
+    task_set(task, TASK_STATUS_RUNNING);
+    task->target(task->id);
+    task_unset(task, TASK_STATUS_RUNNING);
+
+    // drop the activations by 1
+    if (task->pending_activations == 0) {
+      hal_panic("executor_tick_loop: pending_activations would underflow");
+      return TIMESTAMP_MAX;
+    }
+
+    task->pending_activations--;
+
+    // does it need to be cancelled now?
+    if (task_is(task, TASK_STATUS_CANCEL_DEFERRED)) {
+      cancel_task(task);
+
+      goto done_executing;
+    }
+
+    // does it need to be re-queued? (activations > 0)
+    if (task->pending_activations > 0) {
+      task_queue_push(task);
+    }
+  }
+
+done_executing:
 
   // step 4: calculate when the event loop should next execute
 
+  // if we have stuff in the queue, the answer should be "right away"
+
+  if (task_queue_size > 0) {
+    return 0;
+  }
+
+  // 
   // TODO: implement
 
   // request the next tick in 10ms
