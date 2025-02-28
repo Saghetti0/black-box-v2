@@ -464,6 +464,78 @@ uint32_t last_tick_timestamp;
 bool is_initialized = false;
 
 /*
+// awful debugging code
+// at least it looks cool
+static void debug_print_task_state() {
+  printf("task state:\n");
+  for (uint8_t i=0; i<NUM_TASKS; i++) {
+    printf("  %02hx: ", i);
+    executor_task* task = &tasks[i];
+    if (!task_is(task, TASK_STATUS_ALIVE)) {
+      printf("(free)\n");
+      continue;
+    }
+
+    printf("id=%04x ", task->id);
+
+    if (task->type == TASK_TYPE_EVENT) {
+      printf("EVNT ");
+    } else if (task->type == TASK_TYPE_TIMEOUT) {
+      printf("TOUT ");
+    } else if (task->type == TASK_TYPE_INTERVAL) {
+      printf("INTR ");
+    } else {
+      printf("???? ");
+    }
+
+    if (task_is(task, TASK_STATUS_ALIVE)) {
+      printf("a");
+    } else {
+      printf("-");
+    }
+
+    if (task_is(task, TASK_STATUS_ON_QUEUE)) {
+      printf("q");
+    } else {
+      printf("-");
+    }
+
+    if (task_is(task, TASK_STATUS_RUNNING)) {
+      printf("r");
+    } else {
+      printf("-");
+    }
+
+    if (task_is(task, TASK_STATUS_PAUSED)) {
+      printf("p");
+    } else {
+      printf("-");
+    }
+
+    if (task_is(task, TASK_STATUS_CANCEL_DEFERRED)) {
+      printf("c");
+    } else {
+      printf("-");
+    }
+
+    printf(" P=%04u a=%u b=%u\n", task->pending_activations, task->data_a, task->data_b);
+  }
+
+  printf("task queue:\n");
+
+  if (task_queue_size == 0) {
+    printf("  (empty)");
+  } else {
+    for (uint8_t i=0; i<task_queue_size; i++) {
+      executor_task* task = task_queue[(task_queue_head + i) % NUM_TASKS];
+
+      printf("  id=%04x\n", task->id);
+    }
+  }
+}
+*/
+
+/*
  * Initialize the executor. This needs to be run before the loop is ticked.
  */
 void executor_init() {
@@ -644,17 +716,37 @@ uint32_t executor_tick_loop(uint32_t current_time, uint8_t event_counts_in[NUM_E
 
 done_executing:
 
-  // step 4: calculate when the event loop should next execute
+  // step 4: calculate when the event loop should tick next
 
   // if we have stuff in the queue, the answer should be "right away"
-
   if (task_queue_size > 0) {
     return 0;
   }
 
-  // 
-  // TODO: implement
+  // if not, go down the list of all the tasks and see which one is earliest
+  uint32_t soonest = TIMESTAMP_MAX;
 
-  // request the next tick in 10ms
-  return current_time + 10;
+  for (uint8_t i=0; i<NUM_TASKS; i++) {
+    executor_task* task = &tasks[i];
+    if (!task_is(task, TASK_STATUS_ALIVE)) continue;
+
+    // only interval and timeout tasks change our next tick time
+    if (!(
+      (task->type == TASK_TYPE_INTERVAL) ||
+      (task->type == TASK_TYPE_TIMEOUT)
+    )) continue;
+
+    // paused tasks shouldn't cause us to tick earlier
+    if (task_is(task, TASK_STATUS_PAUSED)) continue;
+
+    uint32_t task_next_activation = task->data_a;
+
+    // bump down soonest to the soonest next activation
+    if (task_next_activation < soonest) {
+      soonest = task_next_activation;
+    }
+  }
+
+  // this will be TIMESTAMP_MAX (0xFFFFFFFF) if nothing bumped it down
+  return soonest;
 }

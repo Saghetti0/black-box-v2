@@ -9,33 +9,28 @@
 #include <stdint.h>
 
 uint32_t ctr = 0;
-task_handle cool_timer_2;
+task_handle cool_timer;
 
 void my_task(task_handle self) {
   debug_print("Hello, Black Box v2! ctr=%u id=%u", ctr, self);
   ctr++;
 
-  if (ctr == 10) {
-    task_cancel(cool_timer_2);
-  }
-
-  if (ctr == 20) {
-    // this shouldn't work (task is cancelled)
-    task_unpause(cool_timer_2);
+  if (ctr == 3) {
+    task_pause(self);
   }
 }
 
 void my_event(task_handle self) {
   debug_print("got an event!!\n");
+  ctr = 0;
+  task_handle new_task_id = task_create_interval(my_task, 500);
+  debug_print("Created a new task! id=%d", new_task_id);
 }
 
 // Ran once when the program starts. Set up your variables, timers, etc.
 void setup() {
-  task_handle cool_timer = task_create_interval(my_task, 1000);
+  cool_timer = task_create_interval(my_task, 500);
   debug_print("Created a new task! id=%d", cool_timer);
-  cool_timer_2 = task_create_interval(my_task, 500);
-  debug_print("Created a new task! id=%d", cool_timer_2);
-  task_cancel(cool_timer_2);
 
   task_handle event_task_id = task_create_event(my_event, EVENT_PRESS_UP | EVENT_PRESS_DOWN);
   debug_print("Created a new task! id=%d", event_task_id);

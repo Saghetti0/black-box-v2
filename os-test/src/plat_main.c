@@ -75,9 +75,8 @@ int main(int argc, char** argv) {
 
   uint8_t events[32] = {0};
 
-  uint32_t tick_count = 0;;
-
   while (true) {
+    /*
     tick_count++;
 
     if (tick_count == 300) {
@@ -88,19 +87,32 @@ int main(int argc, char** argv) {
       events[0] = 0;
       events[1] = 0;
     }
+    */
 
     uint32_t next_tick = executor_tick_loop(hal_millis(), events);
+    events[0] = 0;
 
     //printf("next tick: %u\n", next_tick);
 
-    if (next_tick == 0) continue;
+    if (next_tick == 0) {
+      printf("next tick: now!\n");
+      continue;
+    }
+
     if (next_tick == 0xFFFFFFFF) {
-      printf("plat_main: eternal nap time\n");
-      return 0;
+      printf("next tick: never! (eternal nap time)\n");
+
+      printf("press enter to fire event 0: ");
+      getchar();
+      printf("\n");
+      events[0] = 1;
+      continue;
     }
     
     int64_t sleep_duration = (next_tick - hal_millis());
     
+    printf("next tick: in +%lums (%ums from epoch)\n", sleep_duration, next_tick);
+
     if (sleep_duration > 0) {
       msleep(sleep_duration);
     }
