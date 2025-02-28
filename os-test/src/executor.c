@@ -2,9 +2,6 @@
  * executor.c: Cross-platform task scheduler and event loop
  */
 
-// TODO: remove for prod
-#include <stdio.h>
-
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>

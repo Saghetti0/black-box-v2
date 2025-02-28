@@ -54,19 +54,74 @@ void task_unpause(task_handle handle) {
 
 /// LED Matrix
 
-void bb_matrix_set_arr(uint8_t arr[8]);
+void bb_matrix_set_arr(uint8_t arr[8]) {
+  hal_matrix_set_arr(arr);
+}
 
-void bb_matrix_get_arr(uint8_t out_arr[8]);
+void bb_matrix_get_arr(uint8_t out_arr[8]) {
+  hal_matrix_get_arr(out_arr);
+}
 
-void bb_matrix_set_pos(uint8_t x, uint8_t y, led_state state);
+// TODO: reading and writing the entire matrix state to flip 1 pixel might be
+// inefficient if we're doing cross-language calls. do we store the full matrix
+// state somewhere? maybe here? maybe assumed as part of hal impl? idk
 
-void bb_matrix_toggle_pos(uint8_t x, uint8_t y, led_state state);
+void bb_matrix_set_pos(uint8_t x, uint8_t y, led_state state) {
+  if (x >= 8 || y >= 8) return;
 
-led_state bb_matrix_get_pos(uint8_t x, uint8_t y);
+  uint8_t matrix_state[8];
+  hal_matrix_get_arr(matrix_state);
 
-void bb_matrix_all_on();
+  // x=0 is the leftmost led, but in the raw data, bit 0 is the rightmost led
+  // do 7 - x to correct the ordering
+  if (state == LED_ON) {
+    // OR to flip led on
+    matrix_state[y] = (matrix_state[y] | 1 << (7 - x));
+  } else {
+    // AND with everything but our bit of interest to flip led off
+    matrix_state[y] = (matrix_state[y] & ~(1 << (7 - x)));
+  }
 
-void bb_matrix_all_off();
+  hal_matrix_set_arr(matrix_state);
+}
+
+void bb_matrix_toggle_pos(uint8_t x, uint8_t y) {
+  if (x >= 8 || y >= 8) return;
+
+  uint8_t matrix_state[8];
+  hal_matrix_get_arr(matrix_state);
+
+  // XOR to toggle a bit
+  matrix_state[y] = (matrix_state[y] ^ 1 << (7 - x));
+
+  hal_matrix_set_arr(matrix_state);
+}
+
+led_state bb_matrix_get_pos(uint8_t x, uint8_t y) {
+  // assume out-of-bounds LEDs are off
+  if (x >= 8 || y >= 8) return LED_OFF;
+
+  uint8_t matrix_state[8];
+  hal_matrix_get_arr(matrix_state);
+
+  if (matrix_state[y] & (1 << (7 - x))) {
+    return LED_ON;
+  } else {
+    return LED_OFF;
+  }
+}
+
+void bb_matrix_all_on() {
+  uint8_t all_on[8] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+  hal_matrix_set_arr(all_on);
+}
+
+void bb_matrix_all_off() {
+  uint8_t all_off[8] = {0};
+
+  hal_matrix_set_arr(all_off);
+}
 
 /// Synchronous Input
 

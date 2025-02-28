@@ -85,7 +85,7 @@ void bb_matrix_set_pos(uint8_t x, uint8_t y, led_state state);
 /* 
  * Toggle the pixel at (x, y).
  */
-void bb_matrix_toggle_pos(uint8_t x, uint8_t y, led_state state);
+void bb_matrix_toggle_pos(uint8_t x, uint8_t y);
 
 /*
  * Get the state of the pixel at (x, y).
